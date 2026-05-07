@@ -15,9 +15,9 @@ A plugin created as a tab at the end next to E-E-A-T tab, after crawling the sit
 - src/crawl_db.py = Creating new table for devops tickets with functions to save ticket inside database and check whether ticket is already created so the existing ticket will not be created again.
 - src/auth_db.py = Created table for magic link approach for authorization
 - src./mail_service.py = Further update when email is used that it will show magic link is sent to said email to access the tool
-- web/static/cs/styles.css = To accomodate for tabs depending on screen size for multiple screens used by the company.
-- web/static/jsapp.js =For Azure DevOps Project / Board selectors for more dynamic choice than hardcoded .env stuck on one project
-- web/static/jsplugin-loader.js  = Fixing tab overflow on screen changes
+- web/static/css/styles.css = To accomodate for tabs depending on screen size for multiple screens used by the company.
+- web/static/js/app.js =For Azure DevOps Project / Board selectors for more dynamic choice than hardcoded .env stuck on one project
+- web/static/js/plugin-loader.js  = Fixing tab overflow on screen changes
 page-diagnostic.js = Latest plugin, covering on critical errors, broken links and images, missing meta tags and performance problems specifically with Issues Table focusing where the URL, Category, About the Issue and How To Fix having an Ask AI. Once AI is asked, 'Create Ticket' is found to push the ticket to selected Azure board from Azure project.
 - docker-compose.yml = Ensuring even self-hosting in docker during testing phases that only email domains @culturalinfusion could access the tool.
 - main.py = Added CATEGORY_ROLE_MAP dict that maps crawl issue categories (Technical, Performance, SEO etc) to the responsible team role. Five new API endpoints: 
