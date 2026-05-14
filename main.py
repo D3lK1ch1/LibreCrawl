@@ -569,7 +569,20 @@ def verify_email():
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    return jsonify({'success': False, 'message': 'Registration is not available. Use magic link login.'}), 410
+    if DISABLE_REGISTER:
+        return jsonify({'success': False, 'message': 'Registrations are disabled'}), 403
+
+    data = request.get_json() or {}
+    username = (data.get('username') or '').strip()
+    email = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+
+    success, message, user_id = create_user(username, email, password)
+    if not success:
+        return jsonify({'success': False, 'message': message})
+
+    verify_user(user_id)
+    return jsonify({'success': True, 'message': 'Account created. You can now log in.'})
 
 @app.route('/api/login', methods=['POST'])
 def login():
