@@ -17,8 +17,9 @@ from flask_compress import Compress
 from functools import wraps
 from src.crawler import WebCrawler
 from src.settings_manager import SettingsManager
-from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, create_magic_link, verify_magic_link
-from src.email_service import send_verification_email, send_welcome_email, send_magic_link_email
+from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, get_or_create_user_by_email
+from src.email_service import send_verification_email, send_welcome_email
+from authlib.integrations.flask_client import OAuth
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -61,6 +62,15 @@ app.secret_key = 'librecrawl-secret-key-change-in-production'  # TODO: Use envir
 
 # Enable compression for all responses
 Compress(app)
+
+oauth = OAuth(app)
+google = oauth.register(
+    name='google',
+    client_id=os.getenv('GOOGLE_CLIENT_ID'),
+    client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={'scope': 'openid email profile'}
+)
 
 # Initialize database on startup
 init_db()
@@ -556,44 +566,6 @@ def verify_email():
                          app_source=app_source or 'main',
                          redirect_url=redirect_url)
 
-@app.route('/api/request-magic-link', methods=['POST'])
-def request_magic_link():
-    data = request.get_json() or {}
-    email = (data.get('email') or '').strip().lower()
-
-    if not email or '@' not in email:
-        return jsonify({'success': False, 'message': 'A valid email address is required.'})
-
-    if ALLOWED_EMAIL_DOMAIN and not email.endswith(f'@{ALLOWED_EMAIL_DOMAIN}'):
-        return jsonify({'success': False, 'message': f'Only @{ALLOWED_EMAIL_DOMAIN} addresses are allowed.'})
-
-    token = create_magic_link(email)
-    if not token:
-        return jsonify({'success': False, 'message': 'Failed to generate login link. Please try again.'})
-
-    magic_url = f"{MAIN_APP_URL}/auth/magic?token={token}"
-    send_magic_link_email(email, magic_url)
-    return jsonify({'success': True, 'message': 'Check your email for a login link.'})
-
-
-@app.route('/auth/magic', methods=['GET'])
-def magic_link_auth():
-    token = request.args.get('token', '').strip()
-    if not token:
-        return redirect(url_for('login_page', error='invalid'))
-
-    success, user_id, message = verify_magic_link(token)
-
-    if not success:
-        return redirect(url_for('login_page', error='invalid'))
-
-    user = get_user_by_id(user_id)
-    session['user_id'] = user_id
-    session['username'] = user['username']
-    session['tier'] = 'admin' if LOCAL_MODE else user['tier']
-    session.permanent = True
-    return redirect(url_for('index'))
-
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -614,7 +586,30 @@ def login():
         success, message = skip_auth_login(username)
         return jsonify({'success': success, 'message': message})
 
-    return jsonify({'success': False, 'message': 'Password login is not available. Use OTP login.'}), 410
+    success, message, user_data = authenticate_user(username, password)
+    if success:
+        session['user_id'] = user_data['id']
+        session['username'] = user_data['username']
+        session['tier'] = 'admin' if LOCAL_MODE else user_data['tier']
+        session.permanent = True
+    return jsonify({'success': success, 'message': message})
+
+@app.route('/auth/google')
+def google_login():
+    redirect_uri = url_for('google_callback', _external=True)
+    return google.authorize_redirect(redirect_uri)
+
+@app.route('/auth/google/callback')
+def google_callback():
+    token = google.authorize_access_token()
+    email = token['userinfo']['email']
+    user_id = get_or_create_user_by_email(email)
+    user = get_user_by_id(user_id)
+    session['user_id'] = user_id
+    session['username'] = user['username']
+    session['tier'] = 'admin' if LOCAL_MODE else user['tier']
+    session.permanent = True
+    return redirect(url_for('index'))
 
 @app.route('/api/guest-login', methods=['POST'])
 def guest_login():

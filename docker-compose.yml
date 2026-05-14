@@ -13,7 +13,7 @@ services:
       - FLASK_APP=main.py
       - PYTHONUNBUFFERED=1
       # Set to "true" for local mode (no authentication), "false" for production
-      - LOCAL_MODE=${LOCAL_MODE:-true}
+      - LOCAL_MODE=${LOCAL_MODE:-false}
       # Set to "true" to disable new user registrations
       - REGISTRATION_DISABLED=${REGISTRATION_DISABLED:-false}
       # Set to "true" for demo mode (1.5GB per-user memory limit)
@@ -23,6 +23,8 @@ services:
       - DANGEROUSLY_SKIP_AUTH=${DANGEROUSLY_SKIP_AUTH:-false}
       # Email domain allowed to log in
       - ALLOWED_EMAIL_DOMAIN=${ALLOWED_EMAIL_DOMAIN}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
       # Uncomment these for SMTP sending
       # - SMTP_HOST=${SMTP_HOST}
       # - SMTP_PORT=${SMTP_PORT}

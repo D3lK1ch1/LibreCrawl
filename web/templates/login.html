@@ -80,13 +80,6 @@
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
 
-        input#code {
-            font-size: 28px;
-            font-weight: 600;
-            letter-spacing: 10px;
-            text-align: center;
-        }
-
         .btn {
             width: 100%;
             padding: 14px;
@@ -116,15 +109,17 @@
             transform: none;
         }
 
-        .btn-secondary {
-            background: none;
+        .btn-google {
+            display: block;
+            background: white;
+            color: #374151;
             border: 2px solid #e5e7eb;
-            color: #6b7280;
-            margin-top: 12px;
-            font-size: 14px;
+            text-align: center;
+            text-decoration: none;
+            margin-top: 0;
         }
 
-        .btn-secondary:hover {
+        .btn-google:hover {
             background: #f9fafb;
             box-shadow: none;
             transform: none;
@@ -138,17 +133,6 @@
 
         .btn-guest:hover {
             box-shadow: 0 8px 16px rgba(107, 114, 128, 0.3);
-        }
-
-        .email-sent-hint {
-            text-align: center;
-            color: #6b7280;
-            font-size: 13px;
-            margin-bottom: 20px;
-        }
-
-        .email-sent-hint strong {
-            color: #374151;
         }
 
         .alert {
@@ -238,29 +222,9 @@
             <button type="submit" class="btn" id="loginBtn">Login</button>
         </form>
 
-        <div class="divider">or sign in with email</div>
+        <div class="divider">or</div>
 
-        <!-- Step 1: Email -->
-        <div id="stepEmail">
-            <form id="emailForm">
-                <div class="form-group">
-                    <label for="email">Work Email</label>
-                    <input type="email" id="email" name="email" required autofocus
-                        placeholder="you@{{ allowed_domain or 'yourcompany.com' }}">
-                </div>
-                <button type="submit" class="btn" id="sendLinkBtn">Send Login Link</button>
-            </form>
-        </div>
-
-        <!-- Step 2: Check inbox (shown after link is sent) -->
-        <div id="stepSent" style="display:none;">
-            <p class="email-sent-hint">
-                A login link has been sent to <strong id="emailHint"></strong>.<br>
-                Click it to sign in — it expires in 30 minutes.
-            </p>
-            <button type="button" class="btn btn-secondary" id="resendBtn">Resend Link</button>
-            <button type="button" class="btn btn-secondary" id="backBtn" style="margin-top:8px;">Use a different email</button>
-        </div>
+        <a href="/auth/google" class="btn btn-google">Sign in with Google</a>
 
         {% endif %}
 
@@ -318,76 +282,6 @@
 
         {% else %}
 
-        let pendingEmail = '';
-
-        async function requestLink(email) {
-            const res = await fetch('/api/request-magic-link', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email })
-            });
-            return res.json();
-        }
-
-        document.getElementById('emailForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            hideAlert();
-            const email = document.getElementById('email').value.trim();
-            const btn = document.getElementById('sendLinkBtn');
-            btn.disabled = true;
-            btn.textContent = 'Sending...';
-
-            try {
-                const data = await requestLink(email);
-                if (data.success) {
-                    pendingEmail = email;
-                    document.getElementById('emailHint').textContent = email;
-                    document.getElementById('stepEmail').style.display = 'none';
-                    document.getElementById('stepSent').style.display = 'block';
-                } else {
-                    showAlert(data.message, 'error');
-                    btn.disabled = false;
-                    btn.textContent = 'Send Login Link';
-                }
-            } catch {
-                showAlert('An error occurred. Please try again.', 'error');
-                btn.disabled = false;
-                btn.textContent = 'Send Login Link';
-            }
-        });
-
-        document.getElementById('resendBtn').addEventListener('click', async () => {
-            hideAlert();
-            const btn = document.getElementById('resendBtn');
-            btn.disabled = true;
-            btn.textContent = 'Sending...';
-
-            try {
-                const data = await requestLink(pendingEmail);
-                if (data.success) {
-                    showAlert('New link sent.', 'success');
-                } else {
-                    showAlert(data.message, 'error');
-                }
-            } catch {
-                showAlert('An error occurred. Please try again.', 'error');
-            } finally {
-                btn.disabled = false;
-                btn.textContent = 'Resend Link';
-            }
-        });
-
-        document.getElementById('backBtn').addEventListener('click', () => {
-            hideAlert();
-            pendingEmail = '';
-            document.getElementById('stepSent').style.display = 'none';
-            document.getElementById('stepEmail').style.display = 'block';
-            document.getElementById('sendLinkBtn').disabled = false;
-            document.getElementById('sendLinkBtn').textContent = 'Send Login Link';
-            document.getElementById('email').value = '';
-            document.getElementById('email').focus();
-        });
-
         const loginBtn = document.getElementById('loginBtn');
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -429,12 +323,6 @@
         }
 
         {% endif %}
-
-        // Show error from magic link redirect (e.g. expired or invalid token)
-        const urlError = new URLSearchParams(window.location.search).get('error');
-        if (urlError === 'invalid') {
-            showAlert('This login link is invalid or has expired. Please request a new one.', 'error');
-        }
 
         // Guest login
         const guestBtn = document.getElementById('guestBtn');
