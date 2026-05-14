@@ -350,6 +350,10 @@
                 guestBtn.textContent = 'Continue as Guest (3 crawls/24h)';
             }
         });
+        const urlError = new URLSearchParams(window.location.search).get('error');
+        if (urlError === 'domain') {
+            showAlert('Your account is not authorised to access this app.', 'error');
+        }
     </script>
 </body>
 </html>

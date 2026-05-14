@@ -565,7 +565,61 @@ def verify_email():
                          message=message,
                          app_source=app_source or 'main',
                          redirect_url=redirect_url)
+@app.route('/admin')
+def admin_page():
+    # Renders admin.html
+    if 'user_id' not in session:
+        return redirect(url_for('login_page'))
+    user = get_user_by_id(session['user_id'])
+    if not user or user['tier'] != 'admin':
+        return redirect(url_for('index'))
+    return render_template('admin.html')
 
+@app.route('/api/admin/users')
+#Returns all users as JSON
+def admin_users():
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'message': 'Not authenticated'}), 401
+
+    user = get_user_by_id(session['user_id'])
+    if not user or user['tier'] != 'admin':
+        return jsonify({'success': False, 'message': 'Access denied'}), 403
+
+    import sqlite3
+    try:
+        conn = sqlite3.connect(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'users.db'))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute('SELECT id, username, email, tier FROM users')
+        users = [dict(row) for row in cursor.fetchall()]
+
+        conn.close()
+        return jsonify({'success': True, 'users': users})
+    except Exception as e:
+        return jsonify({'success': False, 'message': 'Error fetching users'}), 500
+
+@app.route('/api/admin/set_tier', methods=['POST'])
+def set_tier():
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'message': 'Not authenticated'}), 401
+
+    user = get_user_by_id(session['user_id'])
+    if not user or user['tier'] != 'admin':
+        return jsonify({'success': False, 'message': 'Access denied'}), 403
+
+    data = request.get_json()
+    target_user_id = data.get('user_id')
+    new_tier = data.get('tier')
+
+    if not target_user_id or not new_tier:
+        return jsonify({'success': False, 'message': 'Invalid request'}), 400
+
+    if target_user_id == session['user_id']:
+        return jsonify({'success': False, 'message': 'You cannot change your own tier'}), 400
+
+    success, message = set_user_tier(target_user_id, new_tier)
+    return jsonify({'success': success, 'message': message})
 
 @app.route('/api/register', methods=['POST'])
 def register():
@@ -577,11 +631,15 @@ def register():
     email = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
 
+    if ALLOWED_EMAIL_DOMAIN and not email.endswith(f'@{ALLOWED_EMAIL_DOMAIN}'):
+        return jsonify({'success': False, 'message': f'Email must be from the {ALLOWED_EMAIL_DOMAIN} domain'})
+
     success, message, user_id = create_user(username, email, password)
     if not success:
         return jsonify({'success': False, 'message': message})
 
     verify_user(user_id)
+    set_user_tier(user_id, 'user')
     return jsonify({'success': True, 'message': 'Account created. You can now log in.'})
 
 @app.route('/api/login', methods=['POST'])
@@ -616,6 +674,12 @@ def google_login():
 def google_callback():
     token = google.authorize_access_token()
     email = token['userinfo']['email']
+    if ALLOWED_EMAIL_DOMAIN and not email.endswith(f'@{ALLOWED_EMAIL_DOMAIN}'):
+        return render_template('verification_result.html',
+                             success=False,
+                             message=f'Email must be from the {ALLOWED_EMAIL_DOMAIN} domain',
+                             app_source='main')
+
     user_id = get_or_create_user_by_email(email)
     user = get_user_by_id(user_id)
     session['user_id'] = user_id

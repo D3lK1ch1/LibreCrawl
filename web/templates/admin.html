@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - LibreCrawl</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f9fafb;
+            color: #1f2937;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 32px;
+        }
+
+        .header h1 { font-size: 28px; font-weight: 700; color: #111827; }
+
+        .back-link { color: #667eea; text-decoration: none; font-size: 14px; font-weight: 500; }
+        .back-link:hover { text-decoration: underline; }
+
+        .alert {
+            padding: 12px 16px;
+            border-radius: 8px;
+            margin-bottom: 24px;
+            font-size: 14px;
+            display: none;
+        }
+
+        .alert.show { display: block; }
+        .alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #16a34a; }
+        .alert-error   { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+
+        thead { background: #f3f4f6; }
+
+        th {
+            text-align: left;
+            padding: 12px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #6b7280;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            padding: 14px 16px;
+            font-size: 14px;
+            border-top: 1px solid #f3f4f6;
+            vertical-align: middle;
+        }
+
+        tr:hover td { background: #f9fafb; }
+
+        select {
+            padding: 6px 10px;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            background: white;
+            cursor: pointer;
+        }
+
+        select:focus { outline: none; border-color: #667eea; }
+
+        .save-btn {
+            padding: 6px 14px;
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            margin-left: 8px;
+        }
+
+        .save-btn:hover { background: #5a67d8; }
+        .save-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .verified-yes { color: #16a34a; font-weight: 500; }
+        .verified-no  { color: #dc2626; font-weight: 500; }
+
+        .loading { text-align: center; padding: 40px; color: #6b7280; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>User Management</h1>
+            <a href="/" class="back-link">← Back to app</a>
+        </div>
+
+        <div id="alert" class="alert"></div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Verified</th>
+                    <th>Tier</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody id="userTableBody">
+                <tr><td colspan="5" class="loading">Loading users...</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const alertEl = document.getElementById('alert');
+
+        function showAlert(message, type) {
+            alertEl.textContent = message;
+            alertEl.className = `alert alert-${type} show`;
+            setTimeout(() => { alertEl.className = 'alert'; }, 4000);
+        }
+
+        const TIERS = ['guest', 'user', 'extra', 'admin'];
+
+        async function loadUsers() {
+            const tbody = document.getElementById('userTableBody');
+            try {
+                const res = await fetch('/api/admin/users');
+                const data = await res.json();
+                if (!data.success) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="loading">Error: ${data.message}</td></tr>`;
+                    return;
+                }
+
+                tbody.innerHTML = data.users.map(user => `
+                    <tr>
+                        <td>${user.username}</td>
+                        <td>${user.email || '—'}</td>
+                        <td class="${user.verified ? 'verified-yes' : 'verified-no'}">${user.verified ? 'Yes' : 'No'}</td>
+                        <td>
+                            <select class="tier-select" data-user-id="${user.id}">
+                                ${TIERS.map(t => `<option value="${t}" ${t === user.tier ? 'selected' : ''}>${t}</option>`).join('')}
+                            </select>
+                        </td>
+                        <td>
+                            <button class="save-btn" onclick="saveTier(${user.id}, this)">Save</button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch {
+                tbody.innerHTML = `<tr><td colspan="5" class="loading">Failed to load users.</td></tr>`;
+            }
+        }
+
+        async function saveTier(userId, btn) {
+            const select = document.querySelector(`select[data-user-id="${userId}"]`);
+            const tier = select.value;
+            btn.disabled = true;
+            btn.textContent = 'Saving...';
+
+            try {
+                const res = await fetch('/api/admin/set_tier', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, tier })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showAlert(`${select.closest('tr').querySelector('td').textContent} updated to ${tier}.`, 'success');
+                } else {
+                    showAlert(data.message || 'Failed to update tier.', 'error');
+                }
+            } catch {
+                showAlert('An error occurred.', 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Save';
+            }
+        }
+
+        loadUsers();
+    </script>
+</body>
+</html>

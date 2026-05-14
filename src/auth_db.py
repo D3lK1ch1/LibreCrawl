@@ -626,7 +626,7 @@ def get_or_create_user_by_email(email):
 
             cursor.execute(
                 '''INSERT INTO users (username, email, password_hash, verified, tier)
-                   VALUES (?, ?, ?, 1, 'admin')''',
+                   VALUES (?, ?, ?, 1, 'user')''',
                 (username, email, password_hash_val)
             )
             return cursor.lastrowid
