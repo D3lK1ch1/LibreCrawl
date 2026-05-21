@@ -17,7 +17,7 @@ from flask_compress import Compress
 from functools import wraps
 from src.crawler import WebCrawler
 from src.settings_manager import SettingsManager
-from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, get_or_create_user_by_email
+from src.auth_db import init_db, create_user, authenticate_user, get_user_by_id, log_guest_crawl, get_guest_crawls_last_24h, verify_user, set_user_tier, create_verification_token, verify_token, get_user_by_email, get_or_create_user_by_email, get_all_users, get_pending_users
 from src.email_service import send_verification_email, send_welcome_email
 from authlib.integrations.flask_client import OAuth
 
@@ -55,6 +55,7 @@ DISABLE_GUEST = args.disable_guest or os.getenv('DISABLE_GUEST', '').lower() in 
 DEMO_MODE = args.demo or os.getenv('DEMO_MODE', '').lower() in ('true', '1', 'yes')
 SKIP_AUTH = args.dangerously_skip_auth or os.getenv('DANGEROUSLY_SKIP_AUTH', '').lower() in ('true', '1', 'yes')
 ALLOWED_EMAIL_DOMAIN = os.getenv('ALLOWED_EMAIL_DOMAIN', '')
+ADMIN_EMAILS = [email.strip() for email in os.getenv('ADMIN_EMAILS', '').split(',') if email.strip()]
 MAIN_APP_URL = os.getenv('MAIN_APP_URL', 'http://localhost:5000').rstrip('/')
 
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
@@ -236,6 +237,20 @@ def login_required(f):
             if request.path.startswith('/api/'):
                 return jsonify({'success': False, 'error': 'Authentication required'}), 401
             return redirect(url_for('login_page'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def require_admin(f):
+    """Decorator to require admin tier for routes"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if user_id := session.get('user_id') is None:
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': 'Authentication required'}), 401
+        if session.get('tier') != 'admin':
+            if request.path.startswith('/api/'):
+                return jsonify({'success': False, 'error': 'Admin access required'}), 403
+            return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -616,13 +631,58 @@ def google_login():
 def google_callback():
     token = google.authorize_access_token()
     email = token['userinfo']['email']
-    user_id = get_or_create_user_by_email(email)
+    if email in ADMIN_EMAILS:
+        tier = 'admin'
+    elif email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+        tier = 'extra'
+    else:
+        tier = 'pending'
+    user_id, is_new = get_or_create_user_by_email(email, tier = tier)
     user = get_user_by_id(user_id)
+    if user['tier'] == 'pending':
+        return render_template('verification_result.html',
+                             success=False,
+                             message='Your account is pending approval.',
+                             app_source='main')
+    if user['tier'] == 'rejected':
+        return render_template('verification_result.html',
+                             success=False,
+                             message='Your account registration was rejected.',
+                             app_source='main')
     session['user_id'] = user_id
     session['username'] = user['username']
     session['tier'] = 'admin' if LOCAL_MODE else user['tier']
     session.permanent = True
     return redirect(url_for('index'))
+
+@app.route('/admin/users')
+@require_admin
+def admin_users():
+    """Admin page to view all users"""
+    users = get_all_users()
+    return render_template('admin_users.html', users=get_all_users(), pending = get_pending_users())
+
+@app.route('/admin/users/<int:user_id>/approve', methods=['POST'])
+@require_admin
+def approve_user(user_id):
+    """Approve a pending user"""
+    tier  = request.json.get('tier')  
+    verify_user(user_id)
+    set_user_tier(user_id, tier)
+    return jsonify({'success': True, 'message': 'User approved successfully'})
+
+@app.route('/admin/users/<int:user_id>/reject', methods=['POST'])
+@require_admin
+def reject_user(user_id):
+    set_user_tier(user_id, 'rejected')
+    return jsonify({'success': True})
+
+@app.route('/admin/users/<int:user_id>/tier', methods=['POST'])
+@require_admin
+def admin_set_tier(user_id):
+    tier = request.json.get('tier')
+    set_user_tier(user_id, tier)
+    return jsonify({'success': True})
 
 @app.route('/api/guest-login', methods=['POST'])
 def guest_login():

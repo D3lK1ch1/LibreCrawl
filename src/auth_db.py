@@ -92,22 +92,6 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_token
             ON verification_tokens(token)
         ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS magic_link_tokens (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL,
-                code TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                used INTEGER DEFAULT 0
-            )
-        ''')
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_magic_link_email
-            ON magic_link_tokens(email)
-        ''')
-
         # Add tier column to existing users table if it doesn't exist
         try:
             cursor.execute("ALTER TABLE users ADD COLUMN tier TEXT DEFAULT 'guest'")
@@ -277,6 +261,25 @@ def get_all_users():
         print(f"Error fetching users: {e}")
         return []
 
+def get_pending_users():
+    """Get all pending users (for admin purposes)"""
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, username, email, created_at
+                FROM users
+                WHERE verified = 0 AND tier = 'pending'
+                ORDER BY created_at ASC
+            ''')
+
+            users = cursor.fetchall()
+            return [dict(user) for user in users]
+
+    except Exception as e:
+        print(f"Error fetching pending users: {e}")
+        return []
+
 def verify_user(user_id):
     """Verify a user account (for admin purposes)"""
     try:
@@ -340,7 +343,7 @@ def delete_user_settings(user_id):
 
 def set_user_tier(user_id, tier):
     """Set tier for a user (guest, user, extra, admin)"""
-    valid_tiers = ['guest', 'user', 'extra', 'admin']
+    valid_tiers = ['guest', 'user', 'extra', 'admin', 'pending', 'rejected']
     if tier not in valid_tiers:
         return False, f"Invalid tier. Must be one of: {', '.join(valid_tiers)}"
 
@@ -569,38 +572,10 @@ def get_user_by_email(email):
         return None
 
 
-def create_magic_link(email):
-    """
-    Generate a single-use magic link token for the given email, valid for 30 minutes.
-    Deletes any existing tokens for this email first.
-    Returns the token string.
-    """
-    try:
-        token = secrets.token_urlsafe(32)
-        expires_at = datetime.now() + timedelta(minutes=30)
-
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM magic_link_tokens WHERE email = ?', (email,))
-            cursor.execute(
-                'INSERT INTO magic_link_tokens (email, code, expires_at) VALUES (?, ?, ?)',
-                (email, token, expires_at)
-            )
-
-        return token
-    except Exception as e:
-        print(f"Error creating magic link token: {e}")
-        return None
-
-
-def get_or_create_user_by_email(email):
-    """
-    Return user_id for an OTP-verified email, creating the account if it doesn't exist.
-    New accounts are immediately verified with admin tier.
-    """
+def get_or_create_user_by_email(email, tier='pending'):
     existing = get_user_by_email(email)
     if existing:
-        return existing['id']
+        return existing['id'], False
 
     username = email.split('@')[0]
     placeholder_password = secrets.token_hex(32)
@@ -629,45 +604,7 @@ def get_or_create_user_by_email(email):
                    VALUES (?, ?, ?, 1, 'admin')''',
                 (username, email, password_hash_val)
             )
-            return cursor.lastrowid
+            return cursor.lastrowid, True
     except Exception as e:
         print(f"Error creating OTP user: {e}")
-        return None
-
-
-def verify_magic_link(token):
-    """
-    Verify a magic link token.
-    On success, marks it used and returns (True, user_id, message).
-    On failure, returns (False, None, message).
-    """
-    try:
-        with get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                '''SELECT id, email, code, expires_at FROM magic_link_tokens
-                   WHERE code = ? AND used = 0
-                   ORDER BY created_at DESC LIMIT 1''',
-                (token,)
-            )
-            row = cursor.fetchone()
-
-            if not row:
-                return False, None, 'Invalid or already-used login link.'
-
-            expires_at = datetime.fromisoformat(row['expires_at'])
-            if datetime.now() > expires_at:
-                return False, None, 'This login link has expired. Please request a new one.'
-
-            cursor.execute('UPDATE magic_link_tokens SET used = 1 WHERE id = ?', (row['id'],))
-            email = row['email']
-
-        user_id = get_or_create_user_by_email(email)
-        if not user_id:
-            return False, None, 'Account error. Please contact your administrator.'
-
-        return True, user_id, 'OK'
-
-    except Exception as e:
-        print(f"Error verifying magic link: {e}")
-        return False, None, 'An error occurred. Please try again.'
+        return None, False

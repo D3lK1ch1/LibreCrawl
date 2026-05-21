@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin — LibreCrawl</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f3f4f6;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .page-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .back-link {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+        }
+
+        .back-link:hover { text-decoration: underline; }
+
+        h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: #111827;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .card h2 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #374151;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .empty {
+            color: #9ca3af;
+            font-size: 14px;
+            padding: 8px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        th {
+            text-align: left;
+            padding: 8px 12px;
+            color: #6b7280;
+            font-weight: 500;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid #f3f4f6;
+            color: #111827;
+            vertical-align: middle;
+        }
+
+        tr:last-child td { border-bottom: none; }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 9999px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+
+        .badge-admin    { background: #ede9fe; color: #7c3aed; }
+        .badge-extra    { background: #dbeafe; color: #2563eb; }
+        .badge-user     { background: #d1fae5; color: #059669; }
+        .badge-pending  { background: #fef3c7; color: #d97706; }
+        .badge-rejected { background: #fee2e2; color: #dc2626; }
+
+        .actions { display: flex; align-items: center; gap: 8px; }
+
+        select {
+            padding: 6px 8px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: 'Inter', sans-serif;
+            color: #374151;
+        }
+
+        .btn {
+            padding: 6px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: 'Inter', sans-serif;
+            transition: opacity 0.15s;
+        }
+
+        .btn:hover    { opacity: 0.85; }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-approve { background: #667eea; color: white; }
+        .btn-reject  { background: #fee2e2; color: #dc2626; }
+        .btn-change  { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+
+        .alert {
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            margin-bottom: 16px;
+            display: none;
+        }
+
+        .alert.show    { display: block; }
+        .alert-error   { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; }
+        .alert-success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #16a34a; }
+    </style>
+</head>
+<body>
+    <div class="container">
+
+        <div class="page-header">
+            <a href="/" class="back-link">← Back to app</a>
+            <h1>User Management</h1>
+        </div>
+
+        <div id="alert" class="alert"></div>
+
+        <!-- Section 1: users who signed in via Google but aren't domain-matched -->
+        <div class="card">
+            <h2>Pending Approvals ({{ pending|length }})</h2>
+
+            {% if pending %}
+            <table>
+                <thead>
+                    <tr>
+                        <th>Email</th>
+                        <th>Signed up</th>
+                        <th>Assign tier</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in pending %}
+                    <tr id="row-{{ user.id }}">
+                        <td>{{ user.email }}</td>
+                        <td>{{ user.created_at }}</td>
+                        <td>
+                            <!-- Each row gets its own select, keyed by user.id -->
+                            <select id="tier-{{ user.id }}">
+                                <option value="user">user</option>
+                                <option value="extra">extra</option>
+                                <option value="admin">admin</option>
+                            </select>
+                        </td>
+                        <td>
+                            <div class="actions">
+                                <button class="btn btn-approve" onclick="approve({{ user.id }})">Approve</button>
+                                <button class="btn btn-reject"  onclick="reject({{ user.id }})">Reject</button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="empty">No pending approvals.</p>
+            {% endif %}
+        </div>
+
+        <!-- Section 2: everyone — pending/rejected shown read-only, no tier-change control -->
+        <div class="card">
+            <h2>All Users</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Email</th>
+                        <th>Tier</th>
+                        <th>Joined</th>
+                        <th>Change tier</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>{{ user.username }}</td>
+                        <td>{{ user.email }}</td>
+                        <!-- badge class is built from the tier value: badge-admin, badge-pending, etc. -->
+                        <td><span class="badge badge-{{ user.tier }}">{{ user.tier }}</span></td>
+                        <td>{{ user.created_at }}</td>
+                        <td>
+                            <!-- Only active tiers get the change control — pending/rejected are managed above -->
+                            {% if user.tier not in ('pending', 'rejected') %}
+                            <div class="actions">
+                                <select id="newtier-{{ user.id }}">
+                                    <option value="user"  {% if user.tier == 'user'  %}selected{% endif %}>user</option>
+                                    <option value="extra" {% if user.tier == 'extra' %}selected{% endif %}>extra</option>
+                                    <option value="admin" {% if user.tier == 'admin' %}selected{% endif %}>admin</option>
+                                </select>
+                                <button class="btn btn-change" onclick="changeTier({{ user.id }})">Save</button>
+                            </div>
+                            {% else %}
+                            —
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+    </div>
+
+    <script>
+        const alertEl = document.getElementById('alert');
+
+        function showAlert(message, type) {
+            alertEl.textContent = message;
+            alertEl.className = `alert alert-${type} show`;
+            setTimeout(() => alertEl.className = 'alert', 3000);
+        }
+
+        // Reads the tier select for this row, POSTs to approve route, reloads on success.
+        async function approve(id) {
+            const tier = document.getElementById('tier-' + id).value;
+            const res = await fetch('/admin/users/' + id + '/approve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tier })
+            });
+            const data = await res.json();
+            if (data.success) {
+                showAlert('Approved as ' + tier, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showAlert(data.error || 'Something went wrong', 'error');
+            }
+        }
+
+        async function reject(id) {
+            const res = await fetch('/admin/users/' + id + '/reject', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await res.json();
+            if (data.success) {
+                showAlert('User rejected', 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showAlert(data.error || 'Something went wrong', 'error');
+            }
+        }
+
+        // Same shape as approve — reads a different select, hits a different route.
+        async function changeTier(id) {
+            const tier = document.getElementById('newtier-' + id).value;
+            const res = await fetch('/admin/users/' + id + '/tier', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ tier })
+            });
+            const data = await res.json();
+            if (data.success) {
+                showAlert('Tier updated to ' + tier, 'success');
+                setTimeout(() => location.reload(), 800);
+            } else {
+                showAlert(data.error || 'Something went wrong', 'error');
+            }
+        }
+    </script>
+</body>
+</html>
