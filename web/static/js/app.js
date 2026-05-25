@@ -1543,6 +1543,11 @@ async function loadUserInfo() {
                 // Show username and tier for registered users
                 userInfoElement.textContent = `${user.username} (${user.tier})`;
                 userInfoElement.style.color = '#6b7280';
+
+                if (user.tier === 'admin') {
+                    const adminLink = document.getElementById('adminLink');
+                    if (adminLink) adminLink.style.display = 'inline-block';
+                }
             }
         }
     } catch (error) {

@@ -225,6 +225,14 @@ def get_client_ip():
     # Fall back to direct connection IP
     return request.remote_addr
 
+def get_tier_for_email(email):
+    if email in ADMIN_EMAILS:
+        return 'admin'
+    elif email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
+        return 'user'
+    else:
+        return 'pending'
+
 def login_required(f):
     """Decorator to require login for routes"""
     @wraps(f)
@@ -592,7 +600,13 @@ def register():
     email = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
 
+    tier = get_tier_for_email(email)
+
     success, message, user_id = create_user(username, email, password)
+    if success: 
+        set_user_tier(user_id, tier)
+        if tier != 'pending':
+        verify_user(user_id)  
     if not success:
         return jsonify({'success': False, 'message': message})
 
@@ -625,18 +639,13 @@ def login():
 @app.route('/auth/google')
 def google_login():
     redirect_uri = url_for('google_callback', _external=True)
-    return google.authorize_redirect(redirect_uri)
+    return google.authorize_redirect(redirect_uri, prompt='select_account')
 
 @app.route('/auth/google/callback')
 def google_callback():
     token = google.authorize_access_token()
     email = token['userinfo']['email']
-    if email in ADMIN_EMAILS:
-        tier = 'admin'
-    elif email.endswith(f"@{ALLOWED_EMAIL_DOMAIN}"):
-        tier = 'extra'
-    else:
-        tier = 'pending'
+    tier = get_tier_for_email(email)
     user_id, is_new = get_or_create_user_by_email(email, tier = tier)
     user = get_user_by_id(user_id)
     if user['tier'] == 'pending':

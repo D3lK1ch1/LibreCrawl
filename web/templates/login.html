@@ -239,14 +239,6 @@
         {% endif %}
     </div>
 
-    const params = new URLSearchParams(window.location.search);
-    const errorParam = params.get('error');
-    if (errorParam === 'pending') {
-        showAlert('Your account is pending approval.', 'error');
-    } else if (errorParam === 'rejected') {
-        showAlert('Your account registration was rejected.', 'error');
-    }
-
     <script>
         const alertEl = document.getElementById('alert');
 
@@ -257,6 +249,14 @@
 
         function hideAlert() {
             alertEl.className = 'alert';
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        const errorParam = params.get('error');
+        if (errorParam === 'pending') {
+            showAlert('Your account is pending approval.', 'error');
+        } else if (errorParam === 'rejected') {
+            showAlert('Your account registration was rejected.', 'error');
         }
 
         {% if skip_auth %}

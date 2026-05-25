@@ -249,7 +249,7 @@ def get_all_users():
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT id, username, email, verified, created_at, last_login
+                SELECT id, username, email, tier, verified, created_at, last_login
                 FROM users
                 ORDER BY created_at DESC
             ''')
@@ -269,7 +269,7 @@ def get_pending_users():
             cursor.execute('''
                 SELECT id, username, email, created_at
                 FROM users
-                WHERE verified = 0 AND tier = 'pending'
+                WHERE tier = 'pending'
                 ORDER BY created_at ASC
             ''')
 
@@ -601,8 +601,8 @@ def get_or_create_user_by_email(email, tier='pending'):
 
             cursor.execute(
                 '''INSERT INTO users (username, email, password_hash, verified, tier)
-                   VALUES (?, ?, ?, 1, 'admin')''',
-                (username, email, password_hash_val)
+                   VALUES (?, ?, ?, 1, ?)''',
+                (username, email, password_hash_val, tier)
             )
             return cursor.lastrowid, True
     except Exception as e:
