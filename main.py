@@ -82,7 +82,8 @@ MAIN_APP_URL = os.getenv('MAIN_APP_URL', 'http://localhost:5000').rstrip('/')
 AGENT2_ENABLED = os.getenv('AGENT2_ENABLED', 'true').lower() != 'false'
 AGENT3_ENABLED = os.getenv('AGENT3_ENABLED', 'true').lower() != 'false'
 AGENT4_ENABLED = os.getenv('AGENT4_ENABLED', 'true').lower() != 'false'
-AZURE_QA_TAG   = os.getenv('AZURE_QA_TAG', 'qa')
+AZURE_QA_TAG   = os.getenv('AZURE_QA_TAG', 'qa-agent')
+AZURE_FIX_TAG  = os.getenv('AZURE_FIX_TAG', 'fix-agent')
 
 app = Flask(__name__, template_folder='web/templates', static_folder='web/static')
 app.secret_key = 'librecrawl-secret-key-change-in-production'  # TODO: Use environment variable in production
@@ -92,6 +93,61 @@ Compress(app)
 
 # Initialize database on startup
 init_db()
+
+def _safe_error(e, where):
+    """Log the real exception server-side and return a generic, client-safe message.
+    Returning str(e) (or a raw upstream response body) directly in an API response can
+    leak internal details — file paths, hostnames, stack traces, Azure DevOps error
+    bodies — to whoever calls the endpoint. See CodeQL 'information exposure through
+    an exception' (py/stack-trace-exposure)."""
+    print(f"[Error] {where}: {e}")
+    return 'An internal error occurred. Check server logs for details.'
+
+_PROJECT_NAME_RE = re.compile(r'^[A-Za-z0-9 ._-]{1,64}$')
+
+_AZURE_PROJECTS_CACHE = {}  # org -> (fetched_at, {names})
+_AZURE_PROJECTS_CACHE_TTL = 300  # seconds; avoids one Azure call per ticket in a bulk batch
+
+def _get_valid_azure_project_names(org, pat):
+    """Live set of real project names in this Azure org, cached briefly. Returns None
+    (not an empty set) if the Azure API call itself fails, so callers can fall back to
+    format-only validation instead of wrongly rejecting every project during an Azure
+    outage or PAT issue unrelated to the request being validated."""
+    cached = _AZURE_PROJECTS_CACHE.get(org)
+    now = time.time()
+    if cached and now - cached[0] < _AZURE_PROJECTS_CACHE_TTL:
+        return cached[1]
+    import base64
+    try:
+        token = base64.b64encode(f':{pat}'.encode()).decode()
+        resp = requests.get(
+            f'https://dev.azure.com/{org}/_apis/projects?api-version=7.1&$top=100',
+            headers={'Authorization': f'Basic {token}'}, timeout=10
+        )
+        resp.raise_for_status()
+        names = {p['name'] for p in resp.json().get('value', [])}
+    except Exception as e:
+        print(f"[Warn] _get_valid_azure_project_names: {e}")
+        return None
+    _AZURE_PROJECTS_CACHE[org] = (now, names)
+    return names
+
+def _validate_project_name(project):
+    """Azure DevOps project names get interpolated directly into REST URL paths.
+    Layer 1 (always, no network): reject anything outside the character set Azure
+    actually allows for a project name. Layer 2 (best-effort): confirm it's a project
+    this org's Azure account actually has right now, via a briefly-cached live lookup —
+    real semantic validation instead of format-shape alone. Falls back to layer 1 only
+    if the live lookup is unavailable, rather than breaking ticket creation on an
+    unrelated Azure API hiccup. Raises ValueError if invalid."""
+    if not project or not _PROJECT_NAME_RE.match(project):
+        raise ValueError(f'invalid Azure DevOps project name: {project!r}')
+    org = os.getenv('AZURE_DEVOPS_ORG')
+    pat = os.getenv('AZURE_DEVOPS_PAT')
+    if org and pat:
+        valid_names = _get_valid_azure_project_names(org, pat)
+        if valid_names is not None and project not in valid_names:
+            raise ValueError(f'invalid Azure DevOps project name: {project!r}')
 
 def generate_random_password(length=16):
     """Generate a random password with letters, digits, and symbols"""
@@ -188,10 +244,10 @@ def skip_auth_login(username):
     except sqlite3.IntegrityError as e:
         # Most likely the generated email collides with an existing account
         # whose email happens to match. Fall back to a clearer message.
-        return False, f'Username conflict: try a different username ({e})'
+        return False, 'Username conflict: try a different username'
     except Exception as e:
         print(f"Error in skip_auth_login: {e}")
-        return False, f'Login error: {str(e)}'
+        return False, _safe_error(e, 'skip_auth_login')
 
 if LOCAL_MODE:
     print("=" * 60)
@@ -572,6 +628,8 @@ def probe_http_errors():
     data = request.get_json()
     issues = data.get('issues', [])
 
+    from src.agents.url_safety import safe_head, UnsafeURLError
+
     resolved_urls = []
     BROKEN_IMAGE_PATTERNS = ['Broken Image']
     headers = {'User-Agent': 'LibreCrawlBot/1.0 (+https://librecrawl.com)'}
@@ -583,11 +641,13 @@ def probe_http_errors():
 
         if not probe_url:
             continue
-        try:    
-            response = requests.head(probe_url, allow_redirects=True, timeout=10, headers=headers)
+        try:
+            response = safe_head(probe_url, allow_redirects=True, timeout=10, headers=headers)
             status_code = response.status_code
             if status_code < 400:
                 resolved_urls.append({'url': issue.get('url', ''), 'issue': issue_name})
+        except UnsafeURLError:
+            continue
         except Exception as e:
             pass
 
@@ -793,7 +853,6 @@ def start_crawl():
         return jsonify({'success': False, 'error': 'URL is required'})
 
     user_id = session.get('user_id')
-    session_id = session.get('session_id')
     tier = session.get('tier', 'guest')
 
     # Check guest limits (IP-based) - skip in local mode
@@ -812,6 +871,7 @@ def start_crawl():
 
     # Get or create crawler for this session
     crawler = get_or_create_crawler()
+    session_id = session.get('session_id')
     settings_manager = get_session_settings()
 
     # Apply current settings to crawler before starting
@@ -977,7 +1037,7 @@ def visualization_data():
         traceback.print_exc()
         return jsonify({
             'success': False,
-            'error': str(e),
+            'error': _safe_error(e, 'visualization_data'),
             'nodes': [],
             'edges': []
         })
@@ -1051,7 +1111,7 @@ def filter_issues():
 
         return jsonify({'success': True, 'issues': filtered_issues})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'filter_issues')})
 
 @app.route('/api/get_settings')
 @login_required
@@ -1061,7 +1121,7 @@ def get_settings():
         settings = settings_manager.get_settings()
         return jsonify({'success': True, 'settings': settings})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'get_settings')})
 
 @app.route('/api/save_settings', methods=['POST'])
 @login_required
@@ -1072,7 +1132,7 @@ def save_settings():
         success, message = settings_manager.save_settings(data)
         return jsonify({'success': success, 'message': message})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'save_settings')})
 
 @app.route('/api/reset_settings', methods=['POST'])
 @login_required
@@ -1082,7 +1142,7 @@ def reset_settings():
         success, message = settings_manager.reset_settings()
         return jsonify({'success': success, 'message': message})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'reset_settings')})
 
 @app.route('/api/update_crawler_settings', methods=['POST'])
 @login_required
@@ -1095,7 +1155,7 @@ def update_crawler_settings():
         crawler.update_config(crawler_config)
         return jsonify({'success': True, 'message': 'Crawler settings updated'})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'update_crawler_settings')})
 
 @app.route('/api/pause_crawl', methods=['POST'])
 @login_required
@@ -1105,7 +1165,7 @@ def pause_crawl():
         success, message = crawler.pause_crawl()
         return jsonify({'success': success, 'message': message})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'pause_crawl')})
 
 @app.route('/api/resume_crawl', methods=['POST'])
 @login_required
@@ -1115,7 +1175,7 @@ def resume_crawl():
         success, message = crawler.resume_crawl()
         return jsonify({'success': success, 'message': message})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'resume_crawl')})
 
 @app.route('/api/crawls/list')
 @login_required
@@ -1138,7 +1198,7 @@ def list_crawls():
             'total': total_count
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'list_crawls')})
 
 @app.route('/api/crawls/<int:crawl_id>')
 @login_required
@@ -1172,7 +1232,7 @@ def get_crawl(crawl_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'get_crawl')}), 500
 
 @app.route('/api/crawls/<int:crawl_id>/load', methods=['POST'])
 @login_required
@@ -1236,6 +1296,11 @@ def load_crawl_into_session(crawl_id):
 
         # Set Flask session flag for force full refresh
         session['force_full_refresh'] = True
+        # Without this, create_bulk_tickets' crawl_issues_exist() check would validate
+        # against whatever crawl_id was last set (crawl-start/resume) instead of the
+        # crawl actually being reviewed here — either wrongly rejecting real approvals
+        # or cross-referencing the wrong crawl's issues.
+        session['current_crawl_id'] = crawl_id
 
         return jsonify({
             'success': True,
@@ -1249,7 +1314,7 @@ def load_crawl_into_session(crawl_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'load_crawl_into_session')}), 500
 
 @app.route('/api/crawls/<int:crawl_id>/resume', methods=['POST'])
 @login_required
@@ -1277,7 +1342,7 @@ def resume_crawl_endpoint(crawl_id):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'resume_crawl_endpoint')})
 
 @app.route('/api/crawls/<int:crawl_id>/delete', methods=['DELETE'])
 @login_required
@@ -1298,7 +1363,7 @@ def delete_crawl_endpoint(crawl_id):
         success = delete_crawl(crawl_id)
         return jsonify({'success': success, 'message': 'Crawl deleted successfully' if success else 'Failed to delete crawl'})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'delete_crawl_endpoint')})
 
 @app.route('/api/crawls/<int:crawl_id>/archive', methods=['POST'])
 @login_required
@@ -1319,7 +1384,7 @@ def archive_crawl(crawl_id):
         success = set_crawl_status(crawl_id, 'archived')
         return jsonify({'success': success, 'message': 'Crawl archived successfully' if success else 'Failed to archive crawl'})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'archive_crawl')})
 
 @app.route('/api/crawls/stats')
 @login_required
@@ -1351,7 +1416,7 @@ def crawl_stats():
             'database_size_mb': get_database_size_mb()
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'crawl_stats')})
 
 @app.route('/api/export_data', methods=['POST'])
 @login_required
@@ -1496,7 +1561,7 @@ def export_data():
             })
 
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'export_data')})
 
 def recover_crashed_crawls():
     """Check for and recover any crashed crawls on startup"""
@@ -1654,7 +1719,7 @@ def explain_issue():
         print(f"AI Explain Error: {e}")
         return jsonify({
             'success': False,
-            'error': str(e)
+            'error': _safe_error(e, 'explain_issue')
         }), 500
 
 def _create_single_ticket(url, issue, category, issue_type, ai_explanation, ai_how_to_fix, ai_priority, ai_role, project, parent_id, assignee=None, user_id=None):
@@ -1669,6 +1734,10 @@ def _create_single_ticket(url, issue, category, issue_type, ai_explanation, ai_h
     missing = [k for k, v in {'AZURE_DEVOPS_ORG': org, 'AZURE_DEVOPS_PAT': pat, 'AZURE_DEVOPS_SM_EMAIL': sm_email}.items() if not v]
     if missing:
         return False, {'error': f'Missing .env variables: {", ".join(missing)}'}
+    try:
+        _validate_project_name(project)
+    except ValueError as e:
+        return False, {'error': str(e)}
 
     if issue_type == 'error':
         az_priority, sup_label, moscow = (1, 'Critical', 'Must') if ai_priority == 'high' else (2, 'High', 'Should')
@@ -1738,9 +1807,9 @@ def _create_single_ticket(url, issue, category, issue_type, ai_explanation, ai_h
         save_devops_ticket(url, issue, category, ticket_id, ticket_url, user_id=user_id)
         return True, {'ticket_id': ticket_id, 'ticket_url': ticket_url, 'title': title}
     except requests.exceptions.HTTPError:
-        return False, {'error': f'Azure DevOps {resp.status_code}: {resp.text}'}
+        return False, {'error': _safe_error(f'Azure DevOps {resp.status_code}: {resp.text}', '_create_single_ticket')}
     except Exception as e:
-        return False, {'error': str(e)}
+        return False, {'error': _safe_error(e, '_create_single_ticket')}
 
 
 @app.route('/api/create_devops_ticket', methods=['POST'])
@@ -1774,6 +1843,47 @@ def create_devops_ticket():
         return jsonify({'success': True, **result})
     return jsonify({'success': False, 'error': result['error']}), 500
 
+def _filter_removed_tickets(tickets):
+    """Dedup safety net: a locally-stored devops_tickets row can point at a ticket_id whose
+    Azure work item has since moved to 'Removed' state — treating that as still 'exists'
+    would block a legitimate new ticket forever. Batch-fetches System.State for every
+    ticket_id in `tickets` via Azure's org-level work item batch GET (ticket IDs are unique
+    per-org; devops_tickets has no project column to scope a project-level call to).
+    Removed-state entries are dropped from the returned dict and their stale local rows
+    deleted. Fails open: any error talking to Azure returns `tickets` unfiltered — dedup is
+    a safety net, not a gate, matching the frontend's existing `.catch(() => {})` philosophy.
+    """
+    if not tickets:
+        return tickets
+    org = os.getenv('AZURE_DEVOPS_ORG')
+    pat = os.getenv('AZURE_DEVOPS_PAT')
+    if not org or not pat:
+        return tickets
+    try:
+        import base64
+        ticket_ids = list({str(t['ticket_id']) for t in tickets.values()})[:200]
+        token = base64.b64encode(f':{pat}'.encode()).decode()
+        headers = {'Authorization': f'Basic {token}', 'Content-Type': 'application/json'}
+        batch_url = (
+            f'https://dev.azure.com/{org}/_apis/wit/workitems'
+            f'?ids={",".join(ticket_ids)}&fields=System.Id,System.State&api-version=7.1'
+        )
+        resp = requests.get(batch_url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        removed_ids = {
+            str(item['id']) for item in resp.json().get('value', [])
+            if item.get('fields', {}).get('System.State') == 'Removed'
+        }
+        if not removed_ids:
+            return tickets
+
+        from src.crawl_db import delete_devops_tickets
+        delete_devops_tickets([int(tid) for tid in removed_ids])
+        return {ck: t for ck, t in tickets.items() if str(t['ticket_id']) not in removed_ids}
+    except Exception as e:
+        print(f"[Dedup] Could not check Azure ticket states — skipping Removed-state filter: {e}")
+        return tickets
+
 @app.route('/api/devops_tickets/check', methods=['POST'])
 @login_required
 def check_devops_tickets():
@@ -1782,9 +1892,10 @@ def check_devops_tickets():
         data = request.get_json()
         pairs = data.get('pairs', [])
         tickets = get_tickets_for_issues(pairs)
+        tickets = _filter_removed_tickets(tickets)
         return jsonify({'success': True, 'tickets': tickets})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        return jsonify({'success': False, 'error': _safe_error(e, 'check_devops_tickets')})
 
 @app.route('/api/devops/projects', methods=['GET'])
 @login_required
@@ -1803,7 +1914,7 @@ def devops_projects():
         projects = [{'id': p['id'], 'name': p['name']} for p in resp.json().get('value', [])]
         return jsonify({'success': True, 'projects': projects})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'devops_projects')}), 500
 
 
 @app.route('/api/devops/features', methods=['GET'])
@@ -1818,6 +1929,10 @@ def devops_features():
         return jsonify({'success': False, 'error': 'AZURE_DEVOPS_ORG or AZURE_DEVOPS_PAT not configured'}), 400
     if not project:
         return jsonify({'success': False, 'error': 'project query param required'}), 400
+    try:
+        _validate_project_name(project)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     token    = base64.b64encode(f':{pat}'.encode()).decode()
     headers  = {'Authorization': f'Basic {token}', 'Content-Type': 'application/json'}
     wiql_url = f'https://dev.azure.com/{org}/{quote(project)}/_apis/wit/wiql?api-version=7.1&$top=200'
@@ -1850,21 +1965,28 @@ def devops_features():
         ]
         return jsonify({'success': True, 'features': features})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'devops_features')}), 500
 
 _agent_state = {}
 _qa_bulk_state = {'running': False, 'results': None}
 
 @app.route("/api/agent/start_workflow", methods=['POST'])
+@login_required
 def start_workflow():
     if not AGENT2_ENABLED:
         return jsonify({'success': False, 'error': 'Agent 2 (review) is disabled — set AGENT2_ENABLED=true to enable.'}), 503
     global _agent_state
     data = request.get_json()
-    _agent_state["url"]     = data.get("url")
-    _agent_state["project"] = data.get("project")
-    _agent_state["feature"] = data.get("feature")
-    _agent_state["status"]  = "Workflow started"
+    _agent_state["url"]      = data.get("url")
+    _agent_state["project"]  = data.get("project")
+    _agent_state["feature"]  = data.get("feature")
+    # create_bulk_tickets' forged-request guard needs crawl_id, but its own call comes
+    # from mcp_server.py's http_session (a separate cookie jar, self-calling localhost) —
+    # session.get('current_crawl_id') would be empty for that caller. Captured here
+    # instead, same as project/feature above, since this route runs in the browser's own
+    # session where current_crawl_id is actually set.
+    _agent_state["crawl_id"] = session.get('current_crawl_id')
+    _agent_state["status"]   = "Workflow started"
     _agent_state["issues"]  = data.get("issues", [])
     _agent_state["results"] = None
 
@@ -1875,6 +1997,7 @@ def start_workflow():
     return jsonify({'success': True})
 
 @app.route("/api/agent/workflow_trigger", methods=['GET'])
+@login_required
 def workflow_trigger():
     global _agent_state
     if _agent_state.get("status") != "Workflow started":
@@ -1885,6 +2008,7 @@ def workflow_trigger():
     return jsonify({'ready': True, 'url': _agent_state.get("url"), 'project': _agent_state.get("project"), 'feature': _agent_state.get("feature"), 'issues': _agent_state.get("issues", [])})
 
 @app.route("/api/agent/review", methods=['POST'])
+@login_required
 def agent_review():
     global _agent_state
     data = request.get_json()
@@ -1893,6 +2017,7 @@ def agent_review():
     return jsonify({'success': True})
 
 @app.route("/api/agent/review", methods=['GET'])
+@login_required
 def get_review():
     global _agent_state
     if _agent_state.get("status") != "Review ready":
@@ -1900,6 +2025,7 @@ def get_review():
     return jsonify({'success': True, 'issues': _agent_state.get("review", [])})
 
 @app.route("/api/agent/approval", methods=['POST'])
+@login_required
 def agent_approval():
     global _agent_state
     data = request.get_json()
@@ -1908,6 +2034,7 @@ def agent_approval():
     return jsonify({'success': True})
 
 @app.route("/api/agent/approval", methods=['GET'])
+@login_required
 def get_approval():
     global _agent_state
     if _agent_state.get("status") != "Approval received":
@@ -1915,6 +2042,7 @@ def get_approval():
     return jsonify({'success': True, 'approval': _agent_state.get("approval", [])})
 
 @app.route("/api/agent/create_bulk_tickets", methods=['POST'])
+@login_required
 def create_bulk_tickets():
     global _agent_state
     data      = request.get_json()
@@ -1922,8 +2050,12 @@ def create_bulk_tickets():
     project   = _agent_state.get("project", "")
     parent_id = _agent_state.get("feature", "")
 
+    crawl_id = _agent_state.get('crawl_id')
+    if not crawl_id:
+        return jsonify({'success': False, 'error': 'No active crawl in this session — load or resume a crawl first.'}), 400
+
     import base64 as _b64
-    from src.crawl_db import get_tickets_for_issues
+    from src.crawl_db import get_tickets_for_issues, crawl_issues_exist
 
     created = []
     errors  = []
@@ -1937,11 +2069,21 @@ def create_bulk_tickets():
 
     pairs    = [{'url': i.get('url',''), 'issue': i.get('issue',''), 'cache_key': _cache_key(i.get('url',''), i.get('issue',''))} for i in approved]
     existing = get_tickets_for_issues(pairs)
+    existing = _filter_removed_tickets(existing)
+    # `approved` is client-supplied JSON — only issues LibreCrawl itself detected during
+    # this session's crawl are eligible to become tickets (and reach Agent 3's fetch).
+    # Without this, a forged url in the request body would flow straight into run_fix().
+    valid_keys = crawl_issues_exist(crawl_id, pairs)
 
     for i, issue in enumerate(approved):
         url        = issue.get("url", "")
         issue_name = issue.get("issue", "")
         ck         = pairs[i]['cache_key']
+
+        if f"{url}|{issue_name}" not in valid_keys:
+            errors.append({'url': url, 'issue': issue_name,
+                            'error': 'This issue was not found in the current crawl — rejected.'})
+            continue
 
         if ck in existing:
             t = existing[ck]
@@ -1968,7 +2110,7 @@ def create_bulk_tickets():
                 result['agent3_reason'] = 'Agent 3 is disabled — set AGENT3_ENABLED=true to enable auto-fix.'
             else:
                 try:
-                    from src.agents.fix_agent import run_fix, set_ticket_state, add_ticket_comment
+                    from src.agents.fix_agent import run_fix, set_ticket_state, set_ticket_tag, add_ticket_comment
                     fix_result = run_fix({'url': url, 'issue': issue_name, 'details': issue.get('details', '')})
                     result['agent3_status'] = fix_result.get('status')
                     result['agent3_reason'] = fix_result.get('reason', '')
@@ -1978,14 +2120,19 @@ def create_bulk_tickets():
                     if fix_result['status'] == 'fixed':
                         qa_state = os.getenv('AZURE_QA_STATE', 'QA')
                         result['agent3_qa_state'] = qa_state
-                        result['agent3_qa_updated'] = set_ticket_state(result['ticket_id'], project, qa_state)
+                        result['agent3_qa_updated'] = set_ticket_state(result['ticket_id'], qa_state)
+                        result['agent3_tag_added'] = set_ticket_tag(result['ticket_id'], AZURE_FIX_TAG)
+                        # Agent 4's QA Bulk Run finds tickets by AZURE_QA_TAG, not by state —
+                        # without this, a ticket Agent 3 fixes and moves to 'QA' state never
+                        # surfaces in that checklist for Agent 4 to pick up automatically.
+                        result['agent3_qa_tag_added'] = set_ticket_tag(result['ticket_id'], AZURE_QA_TAG)
                         if fix_result.get('caveat'):
                             result['agent3_comment_added'] = add_ticket_comment(result['ticket_id'], project, fix_result['caveat'])
                     elif fix_result['status'] in ('skipped', 'error') and fix_result.get('reason'):
                         result['agent3_comment_added'] = add_ticket_comment(result['ticket_id'], project, fix_result['reason'])
                 except Exception as e:
                     result['agent3_status'] = 'error'
-                    result['agent3_reason'] = f'Agent 3 failed: {e}'
+                    result['agent3_reason'] = _safe_error(e, 'create_bulk_tickets (Agent 3)')
 
             created.append(result)
         else:
@@ -1996,6 +2143,7 @@ def create_bulk_tickets():
     return jsonify({'success': True, 'created': created, 'errors': errors})
 
 @app.route("/api/agent/results", methods=['GET'])
+@login_required
 def get_results():
     global _agent_state
     if _agent_state.get("status") != "Completed":
@@ -2046,9 +2194,9 @@ def devops_identities():
                     members.append({'email': email, 'name': identity.get('displayName', email)})
         return jsonify({'success': True, 'members': members})
     except requests.exceptions.HTTPError:
-        return jsonify({'success': False, 'error': f'Azure DevOps {resp.status_code}: {resp.text}'}), 500
+        return jsonify({'success': False, 'error': _safe_error(f'Azure DevOps {resp.status_code}: {resp.text}', 'devops_identities')}), 500
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'devops_identities')}), 500
 
 
 @app.route("/api/agent/qa_check_ticket", methods=['POST'])
@@ -2060,34 +2208,38 @@ def agent_qa_check_ticket():
     if not AGENT4_ENABLED:
         return jsonify({'success': False, 'error': 'Agent 4 (QA) is disabled — set AGENT4_ENABLED=true to enable.'}), 503
     data = request.get_json()
-    project = data.get('project') or os.getenv('AZURE_DEVOPS_PROJECT', '')
     ticket_id = data.get('ticket_id')
-    if not project:
-        return jsonify({'success': False, 'error': 'No Azure project selected.'}), 400
     if not ticket_id:
         return jsonify({'success': False, 'error': 'No ticket ID provided.'}), 400
+    try:
+        ticket_id = int(ticket_id)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'ticket_id must be a number.'}), 400
     from src.agents.qa_agent import check_ticket
     try:
-        result = check_ticket(project, ticket_id)
+        result = check_ticket(ticket_id)
         return jsonify({'success': True, 'result': result})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'agent_qa_check_ticket')}), 500
 
 @app.route("/api/agent/qa_mark_done", methods=['POST'])
 @login_required
 def agent_qa_mark_done():
     """Human clicked 'Mark Done' for a ticket Agent 4 confirmed as resolved."""
     data = request.get_json()
-    project = data.get('project') or os.getenv('AZURE_DEVOPS_PROJECT', '')
     ticket_id = data.get('ticket_id')
-    if not project or not ticket_id:
-        return jsonify({'success': False, 'error': 'project and ticket_id are required.'}), 400
+    if not ticket_id:
+        return jsonify({'success': False, 'error': 'ticket_id is required.'}), 400
+    try:
+        ticket_id = int(ticket_id)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'ticket_id must be a number.'}), 400
     from src.agents.qa_agent import mark_ticket_done
     try:
-        ok = mark_ticket_done(project, ticket_id)
+        ok = mark_ticket_done(ticket_id)
         return jsonify({'success': ok})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'agent_qa_mark_done')}), 500
 
 @app.route("/api/agent/qa_post_comment", methods=['POST'])
 @login_required
@@ -2099,12 +2251,20 @@ def agent_qa_post_comment():
     comment = data.get('comment', '').strip()
     if not project or not ticket_id or not comment:
         return jsonify({'success': False, 'error': 'project, ticket_id, and comment are required.'}), 400
+    try:
+        _validate_project_name(project)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    try:
+        ticket_id = int(ticket_id)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'ticket_id must be a number.'}), 400
     from src.agents.qa_agent import post_qa_comment
     try:
         ok = post_qa_comment(project, ticket_id, comment)
         return jsonify({'success': ok})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'agent_qa_post_comment')}), 500
 
 
 def _run_qa_bulk(ticket_ids, project):
@@ -2114,21 +2274,22 @@ def _run_qa_bulk(ticket_ids, project):
     try:
         for tid in ticket_ids:
             try:
-                result = check_ticket(project, int(tid))
+                tid_int = int(tid)
+                result = check_ticket(tid_int)
                 ticket_url = result.get('ticket_url', '')
                 title = result.get('title', '')
                 if result.get('error'):
                     collected.append({'ticket_id': tid, 'ticket_url': ticket_url, 'title': title, 'status': 'skipped', 'reason': result['error']})
                 elif not result.get('still_present'):
-                    mark_ticket_done(project, int(tid))
+                    mark_ticket_done(tid_int)
                     collected.append({'ticket_id': tid, 'ticket_url': ticket_url, 'title': title, 'status': 'done'})
                 else:
                     fix = result.get('ai_how_to_fix')
                     comment = f"Still detected: '{result.get('issue')}'. Suggested fix:\n{fix}" if fix else f"Still detected: '{result.get('issue')}' on {result.get('url')}."
-                    post_qa_comment(project, int(tid), comment)
+                    post_qa_comment(project, tid_int, comment)
                     collected.append({'ticket_id': tid, 'ticket_url': ticket_url, 'title': title, 'status': 'still_present'})
             except Exception as e:
-                collected.append({'ticket_id': tid, 'ticket_url': '', 'title': '', 'status': 'skipped', 'reason': str(e)})
+                collected.append({'ticket_id': tid, 'ticket_url': '', 'title': '', 'status': 'skipped', 'reason': _safe_error(e, '_run_qa_bulk')})
     finally:
         _qa_bulk_state = {'running': False, 'results': collected}
 
@@ -2142,6 +2303,10 @@ def qa_tickets_by_tag():
     project = request.args.get('project') or os.getenv('AZURE_DEVOPS_PROJECT', '')
     if not project:
         return jsonify({'success': False, 'error': 'No Azure project selected.'}), 400
+    try:
+        _validate_project_name(project)
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
     org = os.getenv('AZURE_DEVOPS_ORG')
     if not org:
         return jsonify({'success': False, 'error': 'AZURE_DEVOPS_ORG not configured.'}), 500
@@ -2149,15 +2314,28 @@ def qa_tickets_by_tag():
     try:
         token = base64.b64encode(f':{pat}'.encode()).decode()
         headers = {'Authorization': f'Basic {token}', 'Content-Type': 'application/json'}
-        wiql_url = f'https://dev.azure.com/{org}/{url_quote(project)}/_apis/wit/wiql?api-version=7.1'
-        resp = requests.post(wiql_url, headers=headers, json={"query": f"SELECT [System.Id] FROM WorkItems WHERE [System.Tags] CONTAINS '{AZURE_QA_TAG}' ORDER BY [System.Id] DESC"}, timeout=10)
+        qa_state = os.getenv('AZURE_QA_STATE', 'QA')
+        # Org-scoped (no project in the URL) — the Wiql REST API doesn't require project
+        # in the path, so it's expressed in the WHERE clause instead (safe: project was
+        # just validated above via _validate_project_name's character allowlist, which
+        # forbids the quote characters a WIQL string-literal breakout would need).
+        wiql_url = f'https://dev.azure.com/{org}/_apis/wit/wiql?api-version=7.1'
+        # Requires BOTH the tag AND state=='QA' — a ticket carrying only one (e.g. someone
+        # manually retagged or restated it outside the normal Agent 3 fix flow) shouldn't
+        # surface as a ready-to-check candidate here.
+        query = (f"SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '{project}' "
+                 f"AND [System.Tags] CONTAINS '{AZURE_QA_TAG}' AND [System.State] = '{qa_state}' "
+                 f"ORDER BY [System.Id] DESC")
+        resp = requests.post(wiql_url, headers=headers, json={"query": query}, timeout=10)
         resp.raise_for_status()
         work_items = resp.json().get('workItems', [])
         if not work_items:
             return jsonify({'success': True, 'tickets': []})
         ids = ','.join(str(w['id']) for w in work_items)
         fields = 'System.Id,System.Title,System.State,System.Tags'
-        batch_url = f'https://dev.azure.com/{org}/{url_quote(project)}/_apis/wit/workitems?ids={ids}&fields={fields}&api-version=7.1'
+        # Also org-scoped — the work item ids are already resolved above, and the
+        # Work Items - List REST API doesn't require project in the path either.
+        batch_url = f'https://dev.azure.com/{org}/_apis/wit/workitems?ids={ids}&fields={fields}&api-version=7.1'
         resp2 = requests.get(batch_url, headers=headers, timeout=10)
         resp2.raise_for_status()
         tickets = []
@@ -2173,7 +2351,7 @@ def qa_tickets_by_tag():
             })
         return jsonify({'success': True, 'tickets': tickets})
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': _safe_error(e, 'qa_tickets_by_tag')}), 500
 
 
 @app.route("/api/agent/qa_bulk_run", methods=['POST'])
@@ -2193,6 +2371,11 @@ def qa_bulk_run():
         return jsonify({'success': False, 'error': 'No ticket IDs provided.'}), 400
     if not project:
         return jsonify({'success': False, 'error': 'No Azure project selected.'}), 400
+    try:
+        _validate_project_name(project)
+    except ValueError as e:
+        app.logger.warning("Project validation failed in qa_bulk_run: %s", e)
+        return jsonify({'success': False, 'error': 'Invalid project value provided.'}), 400
     _qa_bulk_state = {'running': True, 'results': None}
     threading.Thread(target=_run_qa_bulk, args=(ticket_ids, project), daemon=True).start()
     return jsonify({'queued': True})

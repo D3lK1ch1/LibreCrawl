@@ -1,6 +1,9 @@
 import os
 import time
+import base64
+import requests
 from dotenv import load_dotenv
+from src.agents.url_safety import safe_get
 load_dotenv()
 
 # Reasoning-quality models for the agentic loop.
@@ -141,3 +144,88 @@ def call_with_tools(messages, tools, system="", agent="unknown", label=""):
         return stop, text, tool_calls, None
 
     return 'end_turn', '', [], None
+
+
+def _fetch_image_bytes(image_url, max_bytes=5 * 1024 * 1024):
+    """Fetch an image for a vision call. Returns (bytes, mime_type, error_reason) — error_reason
+    is None on success. A 404 (or other non-2xx) is called out specifically rather than folded
+    into a generic 'could not fetch' message: it means the <img> src itself is broken on the
+    live site, not just missing alt text, which is worth a human's attention even if no separate
+    Broken Image ticket exists for it."""
+    try:
+        resp = safe_get(image_url, timeout=10)
+    except Exception as e:
+        return None, None, f'network error fetching image: {e}'
+    if resp.status_code == 404:
+        return None, None, 'image returned 404 — this image is broken on the live site, not just missing alt text'
+    try:
+        resp.raise_for_status()
+    except Exception as e:
+        return None, None, f'image request failed: {e}'
+    content_type = resp.headers.get('Content-Type', '')
+    if not content_type.startswith('image/'):
+        return None, None, f'URL did not return an image (Content-Type: {content_type or "unknown"})'
+    if len(resp.content) > max_bytes:
+        return None, None, f'image exceeds {max_bytes // (1024 * 1024)}MB limit for a vision call'
+    return resp.content, content_type.split(';')[0].strip(), None
+
+
+def call_with_vision(image_url, prompt, agent="agent3", label=""):
+    """
+    Send a single image + text prompt to whichever provider is configured — for
+    vision-based tasks (e.g. alt-text generation) that call_with_tools can't do,
+    since that function is text-only for both providers. Kept as a separate
+    function rather than extending call_with_tools so existing text-only callers
+    don't gain an image-shaped payload for no reason.
+
+    Returns: (text, error). error is None on success, or a short string describing
+    why the image couldn't be sent (fetch failure, not an image, too large, no
+    provider configured) — callers should treat a non-None error as "defer this",
+    not retry/crash.
+    """
+    provider = get_provider()
+    if provider is None:
+        return '', 'no AI provider configured'
+
+    image_bytes, mime_type, fetch_error = _fetch_image_bytes(image_url)
+    if image_bytes is None:
+        return '', f'could not fetch image at {image_url} — {fetch_error}'
+
+    if provider == 'anthropic':
+        from anthropic import Anthropic
+        client = Anthropic(api_key=_env('ANTHROPIC_API_KEY'))
+        resp = client.messages.create(
+            model=ANTHROPIC_MODEL,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type': 'image', 'source': {'type': 'base64', 'media_type': mime_type,
+                                                  'data': base64.b64encode(image_bytes).decode()}},
+                    {'type': 'text', 'text': prompt},
+                ],
+            }],
+            max_tokens=300,
+        )
+        text = next((b.text for b in resp.content if b.type == 'text'), '')
+        record_usage(agent, ANTHROPIC_MODEL, resp.usage.input_tokens, resp.usage.output_tokens, label)
+        return text.strip(), None
+
+    elif provider == 'openai':
+        from openai import OpenAI
+        client = OpenAI(api_key=_env('OPENAI_API_KEY'))
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type': 'image_url', 'image_url': {'url': image_url}},
+                    {'type': 'text', 'text': prompt},
+                ],
+            }],
+            max_tokens=300,
+        )
+        text = resp.choices[0].message.content or ''
+        record_usage(agent, OPENAI_MODEL, resp.usage.prompt_tokens, resp.usage.completion_tokens, label)
+        return text.strip(), None
+
+    return '', 'unsupported provider'

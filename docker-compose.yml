@@ -43,6 +43,7 @@ services:
       - AZURE_QA_STATE=${AZURE_QA_STATE:-QA}
       - AZURE_QA_DONE_STATE=${AZURE_QA_DONE_STATE:-Done}
       - AZURE_QA_TAG=${AZURE_QA_TAG:-qa-agent}
+      - AZURE_FIX_TAG=${AZURE_FIX_TAG:-fix-agent}
       - AGENT2_ENABLED=${AGENT2_ENABLED:-true}
       - AGENT3_ENABLED=${AGENT3_ENABLED:-true}
       - AGENT4_ENABLED=${AGENT4_ENABLED:-true}
