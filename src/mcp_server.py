@@ -1,4 +1,4 @@
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 import os
 import requests
 from dotenv import load_dotenv
@@ -9,7 +9,7 @@ http_session = requests.Session()
 BASE_URL = os.getenv('MCP_BASE_URL', 'http://localhost:5000')
 MCP_SERVICE_USERNAME = os.getenv('MCP_SERVICE_USERNAME', '')
 MCP_SERVICE_PASSWORD = os.getenv('MCP_SERVICE_PASSWORD', '')
-mcp = FastMCP("LibreCrawl")
+mcp = MCPServer("LibreCrawl")
 
 
 def _login():

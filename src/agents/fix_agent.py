@@ -738,6 +738,77 @@ def _defer_missing_h1(ticket):
     return "Content judgment call — needs a human to write/approve the heading."
 
 
+# Known REST namespaces for common WordPress image-compression plugins — checked against
+# probe_site()'s raw namespace list when deferring a page-size issue, so the ticket comment
+# can name what was actually looked for rather than assuming nothing is installed.
+IMAGE_COMPRESSION_NAMESPACES = ('shortpixel/v1', 'wp-smushit/v1', 'imagify/v1', 'ewww-image-optimizer/v1')
+
+
+def _extract_broken_image_url(details):
+    """Pull the image URL out of a 'Broken Image' ticket's details string
+    (issue_detector.py's _check_broken_image_issues formats these as
+    'Image does not respond: <url>' or 'Image returned <status>: <url>')."""
+    match = re.search(r'(?:Image returned \d+|Image does not respond):\s*(.+)', details or '')
+    return match.group(1).strip() if match else ''
+
+
+def _defer_broken_image(ticket):
+    """Re-check the broken image right now rather than repeating the crawl-time finding —
+    it may have been fixed (or gone further stale) since the original crawl."""
+    img_url = _extract_broken_image_url(ticket.get('details', ''))
+    if not img_url:
+        return "Referenced image doesn't exist — needs a human to source/select a replacement asset."
+    try:
+        resp = requests.head(img_url, allow_redirects=True, timeout=10)
+        status = resp.status_code
+    except Exception as e:
+        return (f"Re-checked at defer-time: {img_url} still doesn't respond ({e}) — "
+                f"needs a human to source/select a replacement asset.")
+    if status < 400:
+        return (f"Re-checked at defer-time: {img_url} now returns {status} — may have been fixed "
+                f"since the original crawl. Verify and re-run the crawl if so; left deferred since "
+                f"Agent 3 doesn't re-validate crawl results on its own.")
+    return (f"Re-checked at defer-time: {img_url} → {status}. Still broken — needs a human to "
+            f"source/select a replacement asset.")
+
+
+def _defer_page_size(ticket):
+    """Check which image-compression plugins are actually active on the site before deferring,
+    instead of assuming none is present."""
+    details = ticket.get('details', '')
+    try:
+        namespaces = probe_site(ticket['url'])['namespaces']
+    except Exception:
+        namespaces = []
+    found = [ns for ns in IMAGE_COMPRESSION_NAMESPACES if ns in namespaces]
+    if found:
+        return (f"{details} — an image-compression plugin ({', '.join(found)}) is active on this "
+                f"site, but Agent 3 doesn't assume its settings are safe to change automatically; "
+                f"needs a human to review its compression settings for this page's images.")
+    return (f"{details} — checked active plugins on this site for image compression "
+            f"({', '.join(IMAGE_COMPRESSION_NAMESPACES)}) and found none active; install and "
+            f"configure one, then re-run Agent 3.")
+
+
+def _defer_missing_h1(ticket):
+    """Distinguish an archive/listing page — whose H1 (if any) comes from the theme
+    template, not editable post content — from a real single post/page, since only the
+    latter is even theoretically fixable by writing to WordPress content. Confirmed live:
+    ci-dev.xyz/blog/ has no <h1> anywhere in its rendered source at all, and resolve_wp_object
+    can't match it to a post/page — a content write there wouldn't have anywhere to land."""
+    try:
+        wp_object = resolve_wp_object(ticket['url'])
+    except Exception:
+        wp_object = None
+    if wp_object is None:
+        return ("Could not resolve a WordPress post/page object for this URL — likely a "
+                 "theme-generated archive/listing page (e.g. the blog index) rather than "
+                 "editable content, so any H1 here comes from the theme template, not post "
+                 "content. Needs a human/developer to add a heading in the theme template "
+                 "directly — not something Agent 3 can fix by writing to a post.")
+    return "Content judgment call — needs a human to write/approve the heading."
+
+
 # Issue types Agent 3 cannot fix regardless of access level (notes/agent3-fix-or-defer-spec-2026-06-15.md,
 # Section 5). Exact-match issue names -> human-readable reason for the deferred-ticket comment, OR a
 # callable taking the full ticket dict for reasons that need to interpolate ticket details or re-check
